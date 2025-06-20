@@ -9,10 +9,12 @@ import sys
 import argparse
 from pathlib import Path
 from ebooklib import epub
+import markdown
+from markdown.extensions import toc
 
 
 def parse_markdown_file(filepath):
-    """Parse the markdown file and extract chapters with content"""
+    """Parse the markdown file and extract chapters with content using markdown library"""
     with open(filepath, 'r', encoding='utf-8') as f:
         content = f.read()
 
@@ -23,21 +25,29 @@ def parse_markdown_file(filepath):
     lines = content.split('\n')
     
     for line in lines:
-        # Check for chapter headers (## Chapter or ## any header)
-        if line.startswith('## '):
-            # Save previous chapter if exists and has meaningful content
-            if current_chapter and current_content:
-                # Filter out empty lines and check if there's actual content
-                filtered_content = [l for l in current_content if l.strip()]
-                if filtered_content:
-                    chapters.append({
-                        'title': current_chapter,
-                        'content': '\n'.join(current_content)
-                    })
+        # Check for header levels - only ## starts new chapters, others are subheaders
+        header_match = re.match(r'^(#{2,6})\s+(.+)', line)
+        if header_match:
+            header_level = len(header_match.group(1))
+            header_text = header_match.group(2).strip()
+            
+            if header_level == 2:  # ## level - new chapter
+                # Save previous chapter if exists and has meaningful content
+                if current_chapter and current_content:
+                    # Filter out empty lines and check if there's actual content
+                    filtered_content = [l for l in current_content if l.strip()]
+                    if filtered_content:
+                        chapters.append({
+                            'title': current_chapter,
+                            'content': '\n'.join(current_content)
+                        })
 
-            # Start new chapter
-            current_chapter = line.replace('##', '').strip()
-            current_content = []
+                # Start new chapter
+                current_chapter = header_text
+                current_content = []
+            else:  # ### and lower - subheaders within current chapter
+                if current_chapter:  # Only add if we're in a chapter
+                    current_content.append(line)
 
         elif current_chapter:  # We're in a chapter
             current_content.append(line)
@@ -72,28 +82,10 @@ def detect_content_type(content):
     }
 
 
-def format_special_translation(text, sentence_per_line=True):
-    """Format special translation sections with optional sentence-per-line formatting"""
-    if not sentence_per_line:
-        return text
-    
-    # Split into sentences using periods, but be careful with abbreviations
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    formatted_sentences = []
-    
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if sentence:
-            formatted_sentences.append(sentence)
-    
-    return '<br/>'.join(formatted_sentences)
-
-
-def create_chapter_html(chapter_data, book_config):
+def create_chapter_html(chapter_data, _book_config):
     """Create HTML content for a chapter"""
     title = chapter_data['title']
     content = chapter_data['content']
-    sentence_per_line = book_config.get('sentence_per_line', False)
 
     # Validate content
     if not content or not content.strip():
@@ -103,9 +95,9 @@ def create_chapter_html(chapter_data, book_config):
     
     # Create HTML based on content type
     if content_type['has_chinese'] and content_type['has_special_translation']:
-        return create_chinese_translation_html(title, content, content_type, sentence_per_line)
+        return create_chinese_translation_html(title, content, content_type)
     else:
-        return create_standard_html(title, content, sentence_per_line)
+        return create_standard_html(title, content)
 
 
 def create_minimal_html(title):
@@ -123,7 +115,7 @@ def create_minimal_html(title):
 </html>"""
 
 
-def create_standard_html(title, content, sentence_per_line=False):
+def create_standard_html(title, content):
     """Create standard HTML for regular markdown content"""
     html = f"""<!DOCTYPE html>
 <html>
@@ -142,6 +134,11 @@ def create_standard_html(title, content, sentence_per_line=False):
             border-bottom: 2px solid #2F4F4F;
             padding-bottom: 0.5em;
         }}
+        h2, h3, h4, h5, h6 {{
+            color: #2F4F4F;
+            margin-top: 1.5em;
+            margin-bottom: 0.5em;
+        }}
         p {{
             margin: 1em 0;
             text-align: justify;
@@ -156,48 +153,94 @@ def create_standard_html(title, content, sentence_per_line=False):
             color: #2F4F4F;
             margin-top: 0;
         }}
+        blockquote {{
+            border-left: 4px solid #ccc;
+            margin-left: 0;
+            padding-left: 1em;
+            color: #666;
+            font-style: italic;
+        }}
+        ul, ol {{
+            margin: 1em 0;
+            padding-left: 2em;
+        }}
+        li {{
+            margin: 0.5em 0;
+        }}
+        code {{
+            background-color: #f4f4f4;
+            padding: 0.2em 0.4em;
+            font-family: 'Courier New', monospace;
+            border-radius: 3px;
+        }}
+        pre {{
+            background-color: #f4f4f4;
+            padding: 1em;
+            border-radius: 5px;
+            overflow-x: auto;
+        }}
+        pre code {{
+            background: none;
+            padding: 0;
+        }}
     </style>
 </head>
 <body>
     <h1>{title}</h1>
 """
     
-    # Convert markdown content to HTML paragraphs
+    # First, separate special sections from regular content
     lines = content.split('\n')
+    regular_content = []
     in_special_section = False
     special_content = []
     
     for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-            
         # Check for special sections marked with **
         if re.match(r'\*\*.*\*\*', line):
             if in_special_section and special_content:
-                # Close previous special section
-                section_text = ' '.join(special_content)
-                formatted_text = format_special_translation(section_text, sentence_per_line)
+                # Process previous special section
+                section_text = '\n'.join(special_content)
+                md = markdown.Markdown(extensions=['extra', 'nl2br'])
+                formatted_text = md.convert(section_text)
+                section_title = re.sub(r'\*\*(.+)\*\*.*', r'\1', lines[lines.index(line) - len(special_content) - 1])
+                html += f'    <div class="special-section">\n        <h3>{section_title}:</h3>\n'
                 html += f'        <div class="special-text">{formatted_text}</div>\n    </div>\n'
                 special_content = []
             
             # Start new special section
             section_title = re.sub(r'\*\*(.+)\*\*.*', r'\1', line)
-            html += f'    <div class="special-section">\n        <h3>{section_title}:</h3>\n'
             in_special_section = True
             continue
         
         if in_special_section:
             special_content.append(line)
         else:
-            if line:
-                html += f'    <p>{line}</p>\n'
+            regular_content.append(line)
     
-    # Close any remaining special section
+    # Process any remaining special section
     if in_special_section and special_content:
-        section_text = ' '.join(special_content)
-        formatted_text = format_special_translation(section_text, sentence_per_line)
-        html += f'        <div class="special-text">{formatted_text}</div>\n    </div>\n'
+        section_text = '\n'.join(special_content)
+        md = markdown.Markdown(extensions=['extra', 'nl2br'])
+        formatted_text = md.convert(section_text)
+        # Get the section title from the last ** line
+        last_special_line = None
+        for line in reversed(lines):
+            if re.match(r'\*\*.*\*\*', line):
+                last_special_line = line
+                break
+        if last_special_line:
+            section_title = re.sub(r'\*\*(.+)\*\*.*', r'\1', last_special_line)
+            html += f'    <div class="special-section">\n        <h3>{section_title}:</h3>\n'
+            html += f'        <div class="special-text">{formatted_text}</div>\n    </div>\n'
+    
+    # Process regular markdown content
+    if regular_content:
+        regular_markdown = '\n'.join(regular_content)
+        # Use markdown library to convert to HTML - nl2br extension handles newlines
+        md = markdown.Markdown(extensions=['extra', 'codehilite', 'nl2br'])
+        converted_html = md.convert(regular_markdown)
+        html += f'    {converted_html}\n'
     
     html += """
 </body>
@@ -206,7 +249,7 @@ def create_standard_html(title, content, sentence_per_line=False):
     return html
 
 
-def create_chinese_translation_html(title, content, content_type, sentence_per_line=False):
+def create_chinese_translation_html(title, content, content_type):
     """Create HTML for Chinese text with translations"""
     html = f"""<!DOCTYPE html>
 <html>
@@ -302,8 +345,10 @@ def create_chinese_translation_html(title, content, content_type, sentence_per_l
     
     # Add special translation section
     if special_content:
-        translation_text = ' '.join(special_content)
-        formatted_translation = format_special_translation(translation_text, sentence_per_line)
+        translation_text = '\n'.join(special_content)
+        # Use markdown for special translation content too
+        md = markdown.Markdown(extensions=['extra', 'nl2br'])
+        formatted_translation = md.convert(translation_text)
         translation_type = "Translation"
         if content_type['has_mitchell']:
             translation_type = "Stephen Mitchell Translation"
@@ -322,7 +367,7 @@ def create_chinese_translation_html(title, content, content_type, sentence_per_l
     return html
 
 
-def create_ebook(input_file, output_file=None, title=None, author=None, sentence_per_line=False):
+def create_ebook(input_file, output_file=None, title=None, author=None):
     """Create the EPUB ebook from markdown file"""
     input_path = Path(input_file)
     
@@ -352,8 +397,7 @@ def create_ebook(input_file, output_file=None, title=None, author=None, sentence
     book_config = {
         'title': title,
         'author': author,
-        'identifier': input_path.stem.lower().replace(' ', '-'),
-        'sentence_per_line': sentence_per_line
+        'identifier': input_path.stem.lower().replace(' ', '-')
     }
 
     # Debug: Print first few chapter titles
@@ -520,8 +564,6 @@ def main():
     parser.add_argument('-o', '--output', help='Output EPUB file path (optional)')
     parser.add_argument('-t', '--title', help='Book title (optional, derived from filename if not provided)')
     parser.add_argument('-a', '--author', help='Book author (optional, defaults to "Unknown Author")')
-    parser.add_argument('-s', '--sentence-per-line', action='store_true', 
-                       help='Put each sentence on a separate line in special sections (default: False)')
     
     args = parser.parse_args()
     
@@ -529,8 +571,7 @@ def main():
         input_file=args.input_file,
         output_file=args.output,
         title=args.title,
-        author=args.author,
-        sentence_per_line=args.sentence_per_line
+        author=args.author
     )
     
     sys.exit(0 if success else 1)
