@@ -2,3 +2,9 @@ EbookLib
 markdown
 google-generativeai>=0.8.0
 python-dotenv
+python-docx
+striprtf
+odfpy
+PyPDF2
+pdfplumber
+pymupdf
